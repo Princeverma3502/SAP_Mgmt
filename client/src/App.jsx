@@ -1,10 +1,23 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Activity, ArrowDownRight, ArrowRight, ArrowUpRight, BarChart3, Bell, BookOpen,
   Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3, Command,
   Computer, FilePlus2, Filter, LayoutDashboard, LifeBuoy, Menu, MoreHorizontal,
   Network, Plus, Search, Settings2, ShieldCheck, Sparkles, TicketCheck, X,
 } from 'lucide-react'
+import {
+  createTicket as createTicketRequest,
+  fromApiTicket,
+  getResolution,
+  getTriage,
+  getTickets,
+  getUatSummary,
+  toApiTicket,
+  updateTicket,
+  categoryApiToLabel,
+  statusLabelToApi,
+} from './api.js'
+import { AssetsPage, KnowledgeBasePage } from './Sections.jsx'
 
 const seedTickets = [
   { id: 'INC-2026-104', title: 'Goods receipt blocked in MIGO', detail: 'Period 03/2026 is not open for company code 1000.', category: 'SAP Enterprise', priority: 'High', status: 'In progress', requester: 'Ananya Rao', initials: 'AR', department: 'Supply Chain', age: '18 min ago', color: 'violet', sla: '1h 42m' },
@@ -38,6 +51,23 @@ function App() {
   const [selectedTicket, setSelectedTicket] = useState(null)
   const [toast, setToast] = useState('')
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [apiMode, setApiMode] = useState('checking')
+  const [apiMessage, setApiMessage] = useState('')
+
+  useEffect(() => {
+    let mounted = true
+    getTickets().then((records) => {
+      if (!mounted) return
+      setTickets(records.map(fromApiTicket))
+      setApiMode('live')
+      setApiMessage('')
+    }).catch((error) => {
+      if (!mounted) return
+      setApiMode('demo')
+      setApiMessage(error.message)
+    })
+    return () => { mounted = false }
+  }, [])
 
   const visibleTickets = useMemo(() => tickets.filter((ticket) => {
     const haystack = `${ticket.id} ${ticket.title} ${ticket.requester} ${ticket.category}`.toLowerCase()
@@ -49,12 +79,47 @@ function App() {
     window.setTimeout(() => setToast(''), 2800)
   }
 
-  const createTicket = (ticket) => {
-    setTickets((existing) => [ticket, ...existing])
-    setStatusFilter('All tickets')
-    setPage('Tickets')
-    setModalOpen(false)
-    notify('Ticket created successfully')
+  const createTicket = async (ticket) => {
+    try {
+      if (apiMode === 'live') {
+        const record = await createTicketRequest({
+          ...toApiTicket(ticket),
+        })
+        setTickets((existing) => [fromApiTicket(record), ...existing])
+        notify('Ticket saved to the service desk')
+      } else {
+        setTickets((existing) => [ticket, ...existing])
+        notify('Demo ticket created — not saved to the database')
+      }
+      setStatusFilter('All tickets')
+      setPage('Tickets')
+      setModalOpen(false)
+    } catch (error) {
+      notify(error.message)
+    }
+  }
+
+  const saveTicketChanges = async (ticket, changes) => {
+    try {
+      if (apiMode === 'live' && ticket.apiId) {
+        const updated = await updateTicket(ticket.apiId, {
+          status: statusLabelToApi(changes.status),
+          resolutionNote: changes.resolutionNote.trim() || null,
+        })
+        const mapped = fromApiTicket(updated)
+        setTickets((existing) => existing.map((item) => item.apiId === ticket.apiId ? mapped : item))
+        setSelectedTicket(mapped)
+        notify('Ticket changes saved')
+      } else {
+        const updated = { ...ticket, ...changes }
+        setTickets((existing) => existing.map((item) => item.id === ticket.id ? updated : item))
+        setSelectedTicket(updated)
+        notify('Demo ticket changes saved locally')
+      }
+    } catch (error) {
+      notify(error.message)
+      throw error
+    }
   }
 
   return (
@@ -119,6 +184,10 @@ function App() {
             </div>
             <button className="button button-primary" onClick={() => setModalOpen(true)}><Plus size={17} /> New ticket</button>
           </section>
+          <div className={`connection-banner ${apiMode}`}>
+            <span className="connection-indicator" />
+            {apiMode === 'checking' ? 'Connecting to the service desk…' : apiMode === 'live' ? 'Connected to live ticket data' : `Demo data · ${apiMessage}`}
+          </div>
 
           {page === 'Overview' ? (
             <>
@@ -171,15 +240,19 @@ function App() {
                 </div>
               </section>
             </>
-          ) : (
+          ) : page === 'Tickets' ? (
             <TicketTable tickets={visibleTickets} statusFilter={statusFilter} setStatusFilter={setStatusFilter} search={search} onSelect={setSelectedTicket} onViewAll={() => setStatusFilter('All tickets')} expanded />
+          ) : page === 'Assets' ? (
+            <AssetsPage />
+          ) : (
+            <KnowledgeBasePage />
           )}
           <footer className="page-footer"><span>© 2026 Resolve Service Desk</span><span><i className="footer-status" /> All systems operational</span><span>Built for Northstar Group</span></footer>
         </div>
       </main>
 
-      {modalOpen && <NewTicketModal onClose={() => setModalOpen(false)} onCreate={createTicket} />}
-      {selectedTicket && <TicketDetail ticket={selectedTicket} onClose={() => setSelectedTicket(null)} notify={notify} />}
+      {modalOpen && <NewTicketModal apiMode={apiMode} onClose={() => setModalOpen(false)} onCreate={createTicket} />}
+      {selectedTicket && <TicketDetail ticket={selectedTicket} apiMode={apiMode} onClose={() => setSelectedTicket(null)} notify={notify} onSave={saveTicketChanges} />}
       {toast && <div className="toast"><Check size={16} />{toast}</div>}
       {mobileNavOpen && <button className="scrim" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
     </div>
@@ -196,7 +269,7 @@ function MetricCard({ icon: Icon, label, value, change, trend, footnote, color }
 }
 
 function TicketTable({ tickets, statusFilter, setStatusFilter, search, onSelect, onViewAll, expanded = false }) {
-  const filters = ['All tickets', 'New', 'In progress', 'Pending UAT', 'Resolved']
+  const filters = ['All tickets', 'New', 'Assigned', 'In progress', 'Pending UAT', 'Resolved', 'Closed']
   return <section className={`card tickets-card ${expanded ? 'tickets-expanded' : ''}`}>
     <div className="card-heading tickets-heading">
       <div><h2>{expanded ? 'All tickets' : 'Recent tickets'} <span className="ticket-count">{tickets.length}</span></h2><p>{expanded ? 'Manage and track support requests across your team.' : 'Stay on top of the latest support requests.'}</p></div>
@@ -239,12 +312,15 @@ function ActivityRow({ initials, color, name, action, ticket, time }) {
   return <div className="activity-row"><span className={`activity-avatar ${color}`}>{initials}</span><div><p><strong>{name}</strong> {action} <a href="#tickets">{ticket}</a></p><span>{time}</span></div></div>
 }
 
-function NewTicketModal({ onClose, onCreate }) {
+function NewTicketModal({ apiMode, onClose, onCreate }) {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [category, setCategory] = useState('')
   const [priority, setPriority] = useState('')
   const [error, setError] = useState('')
+  const [triage, setTriage] = useState(null)
+  const [triageState, setTriageState] = useState('idle')
+  const [saving, setSaving] = useState(false)
   const detectedCategory = useMemo(() => {
     const text = `${title} ${description}`.toLowerCase()
     if (/sap|fiori|migo|transaction|goods receipt|authorization/.test(text)) return 'SAP Enterprise'
@@ -253,44 +329,150 @@ function NewTicketModal({ onClose, onCreate }) {
     if (/access|account|password|software|permission/.test(text)) return 'Software & Access'
     return ''
   }, [title, description])
-  const submit = (event) => {
+  useEffect(() => {
+    let current = true
+    setTriage(null)
+    if (apiMode !== 'live' || title.trim().length < 5 || description.trim().length < 10) {
+      setTriageState(apiMode === 'live' ? 'idle' : 'demo')
+      return () => { current = false }
+    }
+    setTriageState('loading')
+    const timer = window.setTimeout(() => {
+      getTriage({ title: title.trim(), description: description.trim() })
+        .then((result) => {
+          if (!current) return
+          setTriage(result)
+          setTriageState('ready')
+        })
+        .catch(() => {
+          if (current) setTriageState('error')
+        })
+    }, 650)
+    return () => {
+      current = false
+      window.clearTimeout(timer)
+    }
+  }, [apiMode, title, description])
+
+  const submit = async (event) => {
     event.preventDefault()
     if (!title.trim() || !description.trim()) {
       setError('Add a title and description to create your ticket.')
       return
     }
     const id = `INC-${new Date().getFullYear()}-${String(105 + Math.floor(Math.random() * 800)).padStart(3, '0')}`
-    onCreate({
-      id, title: title.trim(), detail: description.trim(), category: category || detectedCategory || 'Software & Access',
-      priority: priority || (detectedCategory === 'Network & VPN' ? 'High' : 'Medium'), status: 'New',
-      requester: 'Sanjay Kumar', initials: 'SK', department: 'IT Operations', age: 'Just now',
-      color: 'violet', sla: '24h',
-    })
+    const suggestedCategory = triage ? categoryApiToLabel(triage.category) : detectedCategory
+    const suggestedPriority = triage
+      ? triage.priority[0] + triage.priority.slice(1).toLowerCase()
+      : detectedCategory === 'Network & VPN' ? 'High' : 'Medium'
+    const selectedPriority = priority || suggestedPriority
+    const slaTargetHours = triage?.slaTargetHours
+      || ({ Critical: 4, High: 12, Medium: 24, Low: 48 }[selectedPriority])
+    setSaving(true)
+    try {
+      await onCreate({
+        id, title: title.trim(), detail: description.trim(), category: category || suggestedCategory || 'Software & Access',
+        priority: selectedPriority, status: 'New',
+        requester: 'Sanjay Kumar', initials: 'SK', department: 'IT Operations', age: 'Just now',
+        color: 'violet', sla: `${slaTargetHours}h`,
+        aiConfidence: triage?.aiConfidence,
+        aiTriageSummary: triage?.aiTriageSummary,
+        slaTargetHours,
+      })
+    } finally {
+      setSaving(false)
+    }
   }
+  const suggestedCategory = triage ? categoryApiToLabel(triage.category) : detectedCategory
   return <div className="modal-backdrop" role="presentation" onClick={onClose}>
     <section className="modal" role="dialog" aria-modal="true" aria-labelledby="new-ticket-title" onClick={(event) => event.stopPropagation()}>
       <div className="modal-header"><div><span className="modal-icon"><FilePlus2 size={18} /></span><div><h2 id="new-ticket-title">Create a ticket</h2><p>Tell us what’s going on and we’ll get right on it.</p></div></div><button className="icon-button" aria-label="Close dialog" onClick={onClose}><X size={18} /></button></div>
       <form onSubmit={submit} className="ticket-form">
         <label>Ticket title <span className="required">*</span><input autoFocus value={title} onChange={(event) => { setTitle(event.target.value); setError('') }} placeholder="e.g. Unable to post goods receipt in SAP" /></label>
         <label>Description <span className="required">*</span><textarea rows="4" value={description} onChange={(event) => { setDescription(event.target.value); setError('') }} placeholder="Share any details that could help us resolve this faster..." /></label>
-        {(detectedCategory || title.length > 5) && <div className="triage-hint"><span><Sparkles size={14} /> AI triage suggestion <small>Preview</small></span><span className="suggestion-pill">{detectedCategory || 'Analyzing...'}</span><span className="suggestion-confidence">~94% confidence</span></div>}
+        {(detectedCategory || title.length > 5) && <div className="triage-hint"><span><Sparkles size={14} /> AI triage {apiMode === 'live' ? 'result' : 'preview'} <small>{apiMode === 'live' ? 'LIVE' : 'DEMO'}</small></span><span className="suggestion-pill">{triageState === 'loading' ? 'Analyzing…' : suggestedCategory || (triageState === 'error' ? 'AI unavailable' : 'No category detected')}</span><span className="suggestion-confidence">{triage ? `${Math.round(triage.aiConfidence * 100)}% confidence` : apiMode === 'live' && triageState === 'error' ? 'Try again or choose manually' : ''}</span></div>}
         <div className="form-row">
           <label>Category<select value={category} onChange={(event) => setCategory(event.target.value)}><option value="">AI suggested</option><option>SAP Enterprise</option><option>Hardware</option><option>Network & VPN</option><option>Software & Access</option></select></label>
           <label>Priority<select value={priority} onChange={(event) => setPriority(event.target.value)}><option value="">AI suggested</option><option>Low</option><option>Medium</option><option>High</option><option>Critical</option></select></label>
         </div>
         {error && <p className="form-error">{error}</p>}
-        <div className="modal-footer"><span><ShieldCheck size={14} /> Your request is visible to IT support</span><div><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button type="submit" className="button button-primary"><Plus size={16} /> Submit ticket</button></div></div>
+        <div className="modal-footer"><span><ShieldCheck size={14} /> Your request is visible to IT support</span><div><button type="button" className="button button-quiet" onClick={onClose}>Cancel</button><button type="submit" className="button button-primary" disabled={saving}><Plus size={16} /> {saving ? 'Saving…' : 'Submit ticket'}</button></div></div>
       </form>
     </section>
   </div>
 }
 
-function TicketDetail({ ticket, onClose, notify }) {
+function TicketDetail({ ticket, apiMode, onClose, notify, onSave }) {
   const diagnosis = ticket.category === 'SAP Enterprise'
     ? 'Likely caused by a posting period configuration that is not open for the current company code.'
     : ticket.category === 'Network & VPN'
       ? 'Intermittent connectivity may be related to local access point coverage or VPN tunnel timeouts.'
       : 'This request may require a review of device configuration and the associated service access policy.'
+  const [suggestions, setSuggestions] = useState(null)
+  const [resolutionNote, setResolutionNote] = useState(ticket.resolutionNote || '')
+  const [aiLoading, setAiLoading] = useState(false)
+  const [savingNote, setSavingNote] = useState(false)
+  const [aiError, setAiError] = useState('')
+  const [uatSummary, setUatSummary] = useState(null)
+  const [uatLoading, setUatLoading] = useState(false)
+  const [status, setStatus] = useState(ticket.status)
+
+  const loadSuggestions = async () => {
+    if (apiMode !== 'live' || !ticket.apiId) {
+      notify('Connect the API and database to use live AI suggestions')
+      return
+    }
+    setAiLoading(true)
+    setAiError('')
+    try {
+      setSuggestions(await getResolution(ticket.apiId))
+    } catch (error) {
+      setAiError(error.message)
+    } finally {
+      setAiLoading(false)
+    }
+  }
+
+  const copySuggestion = () => {
+    const text = suggestions
+      ? `${suggestions.possibleRootCause}\n\nRecommended steps:\n${suggestions.recommendedSteps.map((step, index) => `${index + 1}. ${step}`).join('\n')}`
+      : diagnosis
+    setResolutionNote(text)
+    notify(suggestions ? 'AI fix copied to resolution notes' : 'Demo suggestion copied to resolution notes')
+  }
+
+  const saveNote = async () => {
+    setSavingNote(true)
+    try {
+      if (status === 'Resolved' && !resolutionNote.trim()) {
+        notify('Add resolution notes before resolving this ticket')
+        return
+      }
+      await onSave(ticket, { status, resolutionNote })
+    } finally {
+      setSavingNote(false)
+    }
+  }
+
+  const summarizeForUat = async () => {
+    if (apiMode !== 'live') {
+      notify('Connect the API and database to use the UAT summarizer')
+      return
+    }
+    if (resolutionNote.trim().length < 10) {
+      notify('Add at least 10 characters of engineering notes first')
+      return
+    }
+    setUatLoading(true)
+    try {
+      setUatSummary(await getUatSummary(resolutionNote))
+    } catch (error) {
+      notify(error.message)
+    } finally {
+      setUatLoading(false)
+    }
+  }
+
   return <div className="drawer-backdrop" onClick={onClose}>
     <aside className="ticket-drawer" role="dialog" aria-modal="true" aria-label={`Ticket ${ticket.id}`} onClick={(event) => event.stopPropagation()}>
       <div className="drawer-top"><span className="drawer-id">{ticket.id}</span><div><button className="icon-button" aria-label="More ticket options"><MoreHorizontal size={19} /></button><button className="icon-button" aria-label="Close ticket detail" onClick={onClose}><X size={18} /></button></div></div>
@@ -298,10 +480,30 @@ function TicketDetail({ ticket, onClose, notify }) {
         <StatusBadge status={ticket.status} /><h2>{ticket.title}</h2><p className="drawer-description">{ticket.detail}</p>
         <div className="drawer-meta"><div><span>Priority</span><strong className={`priority ${ticket.priority.toLowerCase()}`}><i />{ticket.priority}</strong></div><div><span>Category</span><strong>{ticket.category}</strong></div><div><span>SLA remaining</span><strong className={ticket.priority === 'Critical' ? 'breach-text' : ''}>{ticket.sla}</strong></div></div>
         <div className="drawer-section"><h3>Requester</h3><div className="drawer-requester"><span className={`requester-avatar ${ticket.color}`}>{ticket.initials}</span><div><strong>{ticket.requester}</strong><span>{ticket.department} · {ticket.age}</span></div></div></div>
-        <div className="drawer-section ai-diagnosis"><div className="ai-diagnosis-title"><span><Sparkles size={15} /> AI suggested diagnosis</span><span className="ai-label">PREVIEW</span></div><p>{diagnosis}</p><button className="text-link" onClick={() => notify('AI troubleshooting steps are being prepared')}>View troubleshooting steps <ArrowRight size={14} /></button></div>
+        <div className="drawer-section ai-diagnosis">
+          <div className="ai-diagnosis-title"><span><Sparkles size={15} /> AI suggested diagnosis</span><span className="ai-label">{suggestions ? 'LIVE' : 'PREVIEW'}</span></div>
+          {suggestions ? <><p><strong>Possible root cause</strong><br />{suggestions.possibleRootCause}</p><strong className="steps-label">Recommended steps</strong><ol className="suggested-steps">{suggestions.recommendedSteps.map((step, index) => <li key={`${index}-${step}`}>{step}</li>)}</ol>{suggestions.sapTCode && <p className="tcode-hint">SAP transaction: <strong>{suggestions.sapTCode}</strong></p>}</> : <p>{diagnosis}</p>}
+          {aiError && <p className="form-error">{aiError}</p>}
+          <button className="text-link" onClick={loadSuggestions} disabled={aiLoading}>{aiLoading ? 'Generating suggestions…' : suggestions ? 'Refresh AI suggestions' : 'Generate AI troubleshooting'} <ArrowRight size={14} /></button>
+          <button className="copy-fix-button" onClick={copySuggestion}><Check size={14} /> Copy Fix to Resolution Notes</button>
+          <label className="resolution-label">Resolution notes<textarea value={resolutionNote} onChange={(event) => setResolutionNote(event.target.value)} placeholder="Document the fix for the requester..." rows={4} /></label>
+          <button className="button button-primary save-note-button" onClick={saveNote} disabled={savingNote}>{savingNote ? 'Saving…' : 'Save notes'}</button>
+        </div>
+        <div className="drawer-section uat-summary">
+          <h3>End-user UAT summary</h3>
+          <button className="button button-quiet" onClick={summarizeForUat} disabled={uatLoading}>{uatLoading ? 'Summarizing…' : 'Summarize for the requester'} <Sparkles size={13} /></button>
+          {uatSummary && <ul>{uatSummary.summary.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>}
+        </div>
         <div className="drawer-section"><h3>Activity</h3><div className="timeline-entry"><span className="timeline-mark"><Plus size={11} /></span><div><strong>Ticket created</strong><span>{ticket.age} · by {ticket.requester}</span></div></div></div>
       </div>
-      <div className="drawer-actions"><button className="button button-quiet" onClick={() => notify('Ticket link copied')}>Copy link</button><button className="button button-primary" onClick={() => { notify('Ticket opened for assignment'); onClose() }}>Open ticket <ArrowRight size={15} /></button></div>
+      <div className="drawer-actions">
+        <label className="drawer-status-control">Update status
+          <select value={status} onChange={(event) => setStatus(event.target.value)}>
+            {['New', 'Assigned', 'In progress', 'Pending UAT', 'Resolved', 'Closed'].map((item) => <option key={item}>{item}</option>)}
+          </select>
+        </label>
+        <button className="button button-primary" onClick={saveNote} disabled={savingNote}>{savingNote ? 'Saving…' : 'Save changes'} <Check size={14} /></button>
+      </div>
     </aside>
   </div>
 }

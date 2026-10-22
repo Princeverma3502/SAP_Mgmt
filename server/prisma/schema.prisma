@@ -1,0 +1,73 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  END_USER
+  IT_ENGINEER
+  ADMIN
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum TicketStatus {
+  NEW
+  ASSIGNED
+  IN_PROGRESS
+  PENDING_UAT
+  RESOLVED
+  CLOSED
+}
+
+enum AssetCategory {
+  SAP_ENTERPRISE
+  HARDWARE
+  NETWORK_VPN
+  SOFTWARE_ACCESS
+}
+
+model User {
+  id              String   @id @default(uuid())
+  name            String
+  email           String   @unique
+  role            Role     @default(END_USER)
+  department      String
+  createdTickets  Ticket[] @relation("CreatedTickets")
+  assignedTickets Ticket[] @relation("AssignedTickets")
+  createdAt       DateTime @default(now())
+}
+
+model Ticket {
+  id              String         @id @default(uuid())
+  ticketNumber    String         @unique
+  title           String
+  description     String
+  category        AssetCategory
+  priority        TicketPriority @default(MEDIUM)
+  status          TicketStatus   @default(NEW)
+  aiConfidence    Float?
+  aiTriageSummary String?
+  aiSuggestedFix  String?
+  createdById     String
+  createdBy       User           @relation("CreatedTickets", fields: [createdById], references: [id])
+  assignedToId    String?
+  assignedTo      User?          @relation("AssignedTickets", fields: [assignedToId], references: [id])
+  resolutionNote  String?
+  slaTargetHours  Int            @default(24)
+  isSlaBreached   Boolean        @default(false)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([status, priority])
+  @@index([category, createdAt])
+}
